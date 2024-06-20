@@ -24,89 +24,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import argparse
-import json
-from typing import AsyncGenerator
 
-import uvicorn
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, Response, StreamingResponse
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
-from vllm.sampling_params import SamplingParams
-from vllm.utils import random_uuid
+from fastapi_serve import TIMEOUT_KEEP_ALIVE
 
-from outlines.integrations.vllm import JSONLogitsProcessor, RegexLogitsProcessor
+import os
+from multiprocessing import cpu_count
 
-TIMEOUT_KEEP_ALIVE = 5  # seconds.
-TIMEOUT_TO_PREVENT_DEADLOCK = 1  # seconds.
-app = FastAPI()
-engine = None
-
-
-@app.get("/health")
-async def health() -> Response:
-    """Health check."""
-    return Response(status_code=200)
-
-
-@app.post("/generate")
-async def generate(request: Request) -> Response:
-    """Generate completion for the request.
-
-    The request should be a JSON object with the following fields:
-    - prompt: the prompt to use for the generation.
-    - schema: the JSON schema to use for the generation (if regex is not provided).
-    - regex: the regex to use for the generation (if schema is not provided).
-    - stream: whether to stream the results or not.
-    - other fields: the sampling parameters (See `SamplingParams` for details).
-    """
-    assert engine is not None
-
-    request_dict = await request.json()
-    prompt = request_dict.pop("prompt")
-    stream = request_dict.pop("stream", False)
-
-    json_schema = request_dict.pop("schema", None)
-    regex_string = request_dict.pop("regex", None)
-    if json_schema is not None:
-        logits_processors = [JSONLogitsProcessor(json_schema, engine.engine)]
-    elif regex_string is not None:
-        logits_processors = [RegexLogitsProcessor(regex_string, engine.engine)]
-    else:
-        logits_processors = []
-
-    sampling_params = SamplingParams(
-        **request_dict, logits_processors=logits_processors  # type: ignore
-    )
-    request_id = random_uuid()
-
-    results_generator = engine.generate(prompt, sampling_params, request_id)  # type: ignore
-
-    # Streaming case
-    async def stream_results() -> AsyncGenerator[bytes, None]:
-        async for request_output in results_generator:
-            prompt = request_output.prompt
-            text_outputs = [prompt + output.text for output in request_output.outputs]
-            ret = {"text": text_outputs}
-            yield (json.dumps(ret) + "\0").encode("utf-8")
-
-    if stream:
-        return StreamingResponse(stream_results())
-
-    # Non-streaming case
-    final_output = None
-    async for request_output in results_generator:
-        if await request.is_disconnected():
-            # Abort the request if the client disconnects.
-            await engine.abort(request_id)  # type: ignore
-            return Response(status_code=499)
-        final_output = request_output
-
-    assert final_output is not None
-    prompt = final_output.prompt
-    text_outputs = [prompt + output.text for output in final_output.outputs]
-    ret = {"text": text_outputs}
-    return JSONResponse(ret)
+def number_of_workers() -> int:
+    """Calculate the number of workers based on CPU count."""
+    return cpu_count() * 2 + 1
 
 
 if __name__ == "__main__":
@@ -115,6 +43,7 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--ssl-keyfile", type=str, default=None)
     parser.add_argument("--ssl-certfile", type=str, default=None)
+    parser.add_argument("--workers", type=int, default=number_of_workers())
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
 
@@ -125,12 +54,17 @@ if __name__ == "__main__":
     # Sets default for the model (`facebook/opt-125m`)
     engine = AsyncLLMEngine.from_engine_args(engine_args)
 
-    uvicorn.run(
-        app,
-        host=args.host,
-        port=args.port,
-        log_level="debug",
-        timeout_keep_alive=TIMEOUT_KEEP_ALIVE,
-        ssl_keyfile=args.ssl_keyfile,
-        ssl_certfile=args.ssl_certfile,
+    command = (
+        f"gunicorn -w {args.workers} -k uvicorn.workers.UvicornWorker "
+        f"--bind {args.host}:{args.port} "
+        f"--timeout-keep-alive {TIMEOUT_KEEP_ALIVE} "
     )
+
+    if args.ssl_keyfile and args.ssl_certfile:
+        command += (
+            f"--keyfile {args.ssl_keyfile} "
+            f"--certfile {args.ssl_certfile} "
+        )
+
+    command += "fastapi_serve:app"
+    os.system(command)

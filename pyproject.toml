@@ -67,6 +67,7 @@ serve = [
     "vllm>=0.3.0",
     "uvicorn",
     "fastapi",
+    "gunicorn",
     "pydantic>=2.0",
 ]
 
@@ -134,6 +135,7 @@ module = [
     "vllm.*",
     "uvicorn.*",
     "fastapi.*",
+    "gunicorn.*",
     "pycountry.*",
     "pyairports.*",
 ]

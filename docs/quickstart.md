@@ -239,7 +239,7 @@ Outlines can be deployed as a LLM service using [vLLM][vllm]{:target="_blank"} a
 First start the server:
 
 ```python
-python -m outlines.serve.serve --model="mistralai/Mistral-7B-Instruct-v0.2"
+python -m outlines.serve.serve --model="mistralai/Mistral-7B-Instruct-v0.2" --workers=4
 ```
 
 Or you can start the server with Outlines' official Docker image:
